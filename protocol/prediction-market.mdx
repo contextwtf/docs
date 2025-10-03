@@ -1,0 +1,263 @@
+---
+title: PredictionMarket
+sidebarTitle: Overview
+---
+
+PredictionMarket is the main contract which manages market creation, buying and selling outcome tokens, resolving markets and redeeming outcome tokens. This page explains each of those major sections in detail, along with some background on the AMM.
+
+- [AMM](#amm)
+- [Market Creation](#market-creation)
+- [Trading](#trading)
+- [Resolution](#resolution)
+- [Redemption](#redemption)
+- [Misc](#misc)
+
+## AMM
+
+PredictionMarket uses the Liquidity Sensitive variant of the Logarithmic Market Scoring Rule for automated market making. LS-LMSR markets have a few unique properties to be aware of:
+
+- Markets start with low liquidity and become more liquid as volume increases without the need for dedicated liquidity providers.
+- Outcome tokens’ prices can some to greater than \$1. The percentage difference between the actual sum and \$1 is referred to as the _vig_.
+- There is no notion of bounded subsidy loss (as with regular LMSR) or impermanent loss (as with constant product AMMs). Markets end up breakeven or with a surplus.
+
+The core math is out of scope for this doc, but it is implemented in the functions `cost` and `calcPrice` and their various helpers.
+
+LMSR was originally developed by Robin Hanson and the liquidity sensitive variant came later from a group of researchers. You can read more about LMSR and LS-LMSR here:
+
+<Card
+  title="Augur’s blogpost on LS-LMSR"
+  href="https://augur.mystrikingly.com/blog/augur-s-automated-market-maker-the-ls-lmsr"
+>
+  augur.mystrikingly.com
+</Card>
+<Card
+  title="CMU paper introducing LS-LMSR"
+  href="https://www.cs.cmu.edu/~sandholm/liquidity-sensitive%20automated%20market%20maker.teac.pdf"
+>
+  cs.cmu.edu
+</Card>
+<Card title="Robin Hanson introducing LMSR" href="https://mason.gmu.edu/~rhanson/mktscore.pdf">
+  mason.gmu.edu
+</Card>{" "}
+
+## Market Creation
+
+### Relevant Globals
+
+- `uint256 targetVig`: the “house edge”. `targetVig` is in terms of USDC’s standard 6 decimals, so 1e6 == 1,000,000 == 100%. The default value is 70,000 == 7%. This means that prices might sum to at most \$1.07 depending on a market’s state. Actual vig for an active market varies, and is highest at equally priced outcomes and lowest with one dominant outcome.
+- `uint256 feePerOutcome` and `uint256 initialSharesPerOutcome` together determine the market creation fee. The market creation fee solves two problems at once:
+  - The LS-LMSR math requires that outcome tokens have nonzero supplies at all times, so markets need to be initialized with some number of shares. The market creation fee essentially “buys” the initial shares and donates them to the protocol. The shares are accounted internally but not actually minted, and any USDC from the fee that does not go towards redemption payouts is part of the surplus.
+  - Spam
+    Explore admin functions like `setInitialSharesAndFeePerOutcome` and `setInitialSharesAndFeePerOutcomeAndTargetVig` below and on GitHub to learn more about the above variables and how they are related.
+- `bool allowAnyMarketCreator` allows the admin to pause or limit market creation. When false, only addresses granted the MARKET_CREATOR_ROLE can call `createMarket`.
+
+### Structs
+
+#### `struct MarketInfo`
+
+Contains all information about a single market (with the exception of the `marketId`)
+
+- `address oracle`: the address that will later be able to resolve the market. The [context.markets](http://context.markets) platform uses its own oracle for all of its markets, but other platforms and users can provide different oracles. The oracle address needs to be able to call `pauseMarket`, `unpauseMarket`, and `resolveMarketWithPayoutSplit`. These functions are documented in the Resolution section of this page.
+- `bool resolved`: whether a market has been resolved
+- `bool paused`: whether trading is paused. When paused, a market cannot be traded or migrated.
+- `uint256 alpha`: affects price sensitivity. Alpha is calculated at market creation based on the number of outcomes (i.e. 2 for YES/NO markets) and the global target vig.
+- `uint256 totalUsdcIn`: net USDC for that market - increases with buys and decreases with sells. After creating a market with no initial buy, totalUsdcIn should be equal to the global `feePerOutcome` \* 2 (or other number of outcomes).
+- `address creator`: caller of `createMarket`
+- `bytes32 questionId`: Unique ID for associating a question with its offchain details
+- `address surplusRecipient`: recipient of any surplus USDC after resolution. [context.markets](http://context.markets) markets all use one surplus recipient that distributes it to users as part of Context’s rewards program.
+- `uint256[] outcomeQs`: internal accounting of outcome shares. Matches the ERC20 OutcomeToken total supplies plus the global `initialSharesPerOutcome`.
+- `uint256[] outcomeTokens`: addresses of the outcome tokens. Length and indices match `outcomeQs`.
+- `uint256[] payoutPcts`: final payout values. For a binary market with outcomes “A” and “B” where “A” eventually is the winning outcome, payoutPcts will start as [0, 0] and then will be set to [1e6, 0] at resolution.
+- `uint256 initialSharesPerOutcome`: used to keep track of the global value at the time of market creation, used during resolution.
+
+#### `struct CreateMarketParams`
+
+passed into `createMarket()`.
+
+- `address oracle`: the address that will later be able to resolve the market. The [context.markets](http://context.markets) platform uses its own oracle for all of its markets, but other platforms and users can provide different oracles. See note on oracles in the Resolution section of this page.
+- `uint256 initialBuyMaxCost`: the market creator can specify an optional first buy to make as soon as the market is created. This is the maximum amount of USDC the creator is willing to spend on that trade.
+- `bytes32 questionId`: see note in MarketInfo above
+- `address surplusRecipient`: see note in MarketInfo above
+- `bytes metadata`: see the below page for more information on how [context.markets](http://context.markets) uses metadata
+  [Market Metadata](/protocol/prediction-market/market-metadata)
+- `int256[] initialBuyShares`: array of buy amounts for the optional initial buy. Despite being signed, the values must be positive. Indices match `outcomeNames` below.
+- `string[] outcomeNames` example: `["NO", "YES"]`. The length and positions of these indices are what determine the length and position of other key market arrays like `outcomeQs`, `outcomeTokens` and `payoutPcts`.
+
+### Events
+
+```solidity
+event MarketCreated(
+    bytes32 indexed marketId,
+    address indexed oracle,
+    bytes32 indexed questionId,
+    address surplusRecipient,
+    address creator,
+    bytes metadata,
+    uint256 alpha,
+    uint256 marketCreationFee,
+    address[] outcomeTokens,
+    string[] outcomeNames,
+    uint256[] outcomeQs
+)
+```
+
+Note: `marketId` is the key identifier of a market in the PredictionMarket contract. `questionId` is just there to point to offchain data and is not used after `createMarket`.
+
+### Functions
+
+```solidity
+function createMarket(CreateMarketParams calldata params) external returns (bytes32)
+```
+
+`createMarket` does the following:
+
+- Validates `params`
+- Takes the market creation fee
+- Deploys and initializes one OutcomeToken contract per outcome
+- Executes the optional initial buy
+- Sets up the MarketInfo struct in storage
+- Emits `MarketCreated`
+- Returns `marketId`
+
+## Trading
+
+### Structs
+
+```solidity
+struct Trade {
+    bytes32 marketId;
+    int256[] deltaShares; // Positive = buy, negative = sell
+    uint256 maxCost; // Maximum USDC to spend
+    uint256 minPayout; // Minimum USDC to receive
+    uint256 deadline; // Expiration timestamp
+}
+```
+
+`Trade` is passed into the trade function. Note that `deltaShares` is a signed array, meaning you can do a mixed buy & sell in one trade. The array must match the length and indices of arrays like `outcomeQs` and `outcomeNames`. For a market with outcomeNames `["NO", "YES"]`, a simple YES buy of 100 shares would equate to a deltaShares of `[0, 100e6]`.
+
+### Events
+
+```solidity
+event MarketTraded(
+    bytes32 indexed marketId,
+    address indexed trader,
+    uint256 alpha, // redundant with MarketCreated
+    int256 usdcFlow, // same as return value of trade()
+    int256[] deltaShares, // same as Trade struct deltaShares
+    uint256[] outcomeQs // market's updated outcomeQs
+)
+```
+
+`alpha` and `outcomeQs` are essential to doing any LS-LMSR pricing math so alpha is emitted redundantly (never changes after MarketCreated) and the market’s new outcome q-values are emitted with every trade for convenience.
+
+### Functions
+
+```solidity
+function trade(Trade memory tradeData) external returns (int256);
+
+function quoteTrade(uint256[] memory qs, uint256 alpha, int256[] memory deltaShares) public pure returns (int256 costDelta);
+```
+
+`trade(tradeData)`does the following:
+
+- validates tradeData and market
+- gets the cost delta via `quoteTrade`
+- takes or sends USDC
+- mints and/or burns outcome tokens
+- emits `MarketTraded`
+- returns the USDC flow of the trade (positive = paid to user, negative = taken from user). This is the same costDelta from `quoteTrade`
+
+`quoteTrade` is a pure function that can optionally be used to simulate a trade given any market state and desired trade (represented as deltaShares)
+
+## Resolution
+
+### Events
+
+```solidity
+
+event MarketPausedUpdated(bytes32 indexed marketId, bool paused)
+event MarketResolved(bytes32 indexed marketId, uint256[] payoutPcts, uint256 surplus)
+```
+
+### Functions
+
+```solidity
+function pauseMarket(bytes32 marketId);
+function unpauseMarket(bytes32 marketId);
+function resolveMarketWithPayoutSplit(bytes32 marketId, uint256[] calldata payoutPcts);
+```
+
+`resolveMarketWithPayoutSplit` is called by the specific market’s oracle. `payoutPcts` must sum to 1e6. The function does the following:
+
+- Validate market and payoutPcts
+- Sets the MarketInfo `resolved` and `payoutPcts` in storage
+- Calculates the total payout needed for all winning outcome token redemptions, and the surplus
+- emits MarketResolved
+
+`pauseMarket` and `unpauseMarket` can also be called by the oracle. It is strongly recommended to pause before resolving. If a market is paused and then resolved, the market does not need to be unpaused in order for outcome token holders to be able to redeem them for USDC. When a market is paused, outcome tokens can still be transferred.
+
+It is important to note that `oracle` in the context of the PredictionMarket contract is just a role: it is a specified address that can pause, unpause and resolve the market. [context.markets](http://context.markets) has its own off-chain oracle that determines outcomes and its own resolver contract that takes these actions with a reasonable time buffer, and all markets on the platform will specify that same contract as the `oracle`. When [`allowAnyMarketCreator`](/protocol/prediction-market) is true and anyone can create a market specifying any oracle, **PredictionMarket does not prevent markets with bad (error-prone or nonfunctioning or malicious) oracles from being created.**
+
+## Redemption
+
+```solidity
+event TokensRedeemed(
+    bytes32 indexed marketId,
+    address indexed redeemer,
+    address token,
+    uint256 shares,
+    uint256 payout
+)
+```
+
+```solidity
+function redeem(address token, uint256 amount);
+```
+
+`redeem` is called by the outcome token holder after a market is resolved. It validates the market state, burns `amount` tokens from the caller and sends the appropriate USDC payout back to the caller.
+
+## Misc
+
+### Info
+
+```solidity
+// returns prices array (prices sum to something between ~1e6 and 1e6 + targetVig)
+function getPrices(bytes32 marketId) external view returns (uint256[] memory);
+
+function getMarketInfo(bytes32 marketId) external view returns (MarketInfo memory);
+function marketExists(bytes32 marketId) public view returns (bool);
+```
+
+### Surplus
+
+```solidity
+event SurplusWithdrawn(address indexed to, uint256 amount)
+
+function withdrawSurplus()
+```
+
+Withdraws all surplus USDC for all resolved markets for which the caller is the `surplusRecipient`
+
+### OutcomeToken
+
+OutcomeToken is a solady ERC20 launched by the PredictionMarket contract, one per outcome. The PredictionMarket contract is the authorized minter and burner. The `decimals` are always 6 (matches USDC). The `symbol` is the same as in `outcomeNames` and the `name` is set to `<outcomeName>: <marketId hex string>`.
+
+### Other Events
+
+```solidity
+event AllowAnyMarketCreatorUpdated(bool allow)
+event FeePerOutcomeUpdated(uint256 oldFee, uint256 newFee)
+event TargetVigUpdated(uint256 oldTargetVig, uint256 newTargetVig)
+event InitialSharesPerOutcomeUpdated(uint256 oldShares, uint256 newShares)
+event MaxOutcomesUpdated(uint256 oldMaxOutcomes, uint256 newMaxOutcomes)
+```
+
+An alternative UI / platform that interacts with the protocol should watch the above events for global variable updates.
+
+### Migration
+
+The contract is not upgradeable, but markets can be individually migrated to a future version.
+
+<Card title="Still have questions?" href="https://discord.gg/FN2aXT6b" icon="discord" horizontal>
+  Ask in Discord.
+</Card>

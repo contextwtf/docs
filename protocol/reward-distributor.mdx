@@ -1,0 +1,57 @@
+---
+title: RewardDistributor
+---
+
+RewardDistributor allows Context to distribute any rewards to users via merkle trees. The only non-admin functions are for claiming rewards.
+
+## Claiming Rewards
+
+### Events
+
+```solidity
+event RewardClaimed(uint256 indexed epochId, address indexed user, uint256 amount);
+```
+
+### Functions
+
+```solidity
+/**
+ * @notice Claims reward for a specific epoch using a merkle proof
+ * @dev Transfers USDC to the caller if the proof is valid and not already claimed
+ * @param epochId The epoch ID to claim rewards for
+ * @param amount The amount of USDC to claim
+ * @param proof Merkle proof verifying the claim
+ */
+function claimReward(
+    uint256 epochId,
+    uint256 amount,
+    bytes32[] calldata proof
+);
+
+function batchClaimRewards(
+    uint256[] calldata epochIds_,
+    uint256[] calldata amounts,
+    bytes32[][] calldata proofs
+);
+```
+
+A leaf of the merkle tree is expected to contain the recipient followed by the amount.
+
+## Admin Actions
+
+The main admin action relevant to a user being able to claim rewards is setting merkle roots, and the relevant event is:
+
+```solidity
+event EpochRootSet(uint256 indexed epochId, bytes32 merkleRoot);
+```
+
+Once a merkle root is set for an epoch id, users in that merkle tree can claim their rewards. The epoch id and merkle root are needed to claim a reward.
+
+<Card
+  title="Still have questions?"
+  href="https://discord.gg/FN2aXT6b"
+  icon="discord"
+  horizontal
+>
+  Ask in Discord.
+</Card>

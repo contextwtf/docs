@@ -1,0 +1,48 @@
+---
+title: Market Metadata
+---
+
+[context.markets](http://context.markets) uses the below scheme for `metadata` in the protocol
+
+## JSON payload
+
+```json
+{
+  "id": "0x0000000000000000000000000000000000000000000000000000000000000000",
+  "text": "Full market question",
+  "shortText": "Short question",
+  "criteria": "Resolves YES if…",
+  "endTime": 1758509334,
+  "sources": ["https://x.com/example"],
+  "explanation": "Optional moderation note"
+}
+```
+
+### Field reference
+
+- `id`: 32-byte hex string (0x-prefixed). The first 20 bytes encode the expected on-chain market creator address; the remaining 12 bytes are random entropy. This is the same as the `CreateMarketParams.questionId` field.
+- `text`: Primary market question shown in long-form contexts.
+- `shortText`: Condensed question for cards and summaries.
+- `criteria`: Resolution instructions. Conventionally begins with "Resolves YES if" and may include bullet points.
+- `endTime`: Unix timestamp (seconds) for when resolution should occur.
+- `sources`: Array of strings pointing to the data sources used by the oracle (e.g. `https://x.com/<handle>`). The Context frontend currently expects X accounts.
+- `explanation` (optional): Short moderation or quality note. Omit entirely if unused.
+
+## Encoding
+
+1. Build the JSON object above with UTF-8 text.
+2. Convert the JSON string to bytes using UTF-8.
+3. Compress the bytes with gzip (DEFLATE). Any gzip implementation that produces a standard gzip container is acceptable.
+4. Hex-encode the compressed bytes (lowercase hex) and prepend `0x`.
+5. Submit that string as the `metadata` field when calling the smart contract.
+
+## Decoding
+
+1. Take the on-chain string and strip the leading `0x`.
+2. Hex-decode the remainder into raw bytes.
+3. Gunzip the bytes to recover the original JSON string.
+4. Parse the JSON into the schema described above.
+
+<Card title="Still have questions?" href="https://discord.gg/FN2aXT6b" icon="discord" horizontal>
+  Ask in Discord.
+</Card>

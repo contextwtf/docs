@@ -1,0 +1,119 @@
+---
+title: Vault
+---
+
+Vault allows users of [context.markets](http://context.markets) to complete various actions Context might decide to reward as part of its rewards program. Vault enables three main actions: staking tokens, locking tokens until resolution, and “sponsored locks” (also referred to as “boosting”) which means purchasing with a subsidy from Context _and_ locking them. Due to the way the [PredictionMarket](/protocol/prediction-market) AMM works, a market’s liquidity is proportional to its’ total outcome token supply. All three of these actions encourage/enable token buys (minting) and discourage sells (burning).
+
+There is no onchain guarantee that interacting with the Vault will earn rewards. Vault is designed to be interacted with via the Context interface. Rewards are distributed in a [separate contract](/protocol/reward-distributor) at Context’s discretion according to the rules of its rewards program.
+
+This page explains staking, locking, and boosting in the smart contract in detail. It does not explain Context’s rewards program.
+
+## Staking
+
+Staking sends `amounts` outcome tokens from `msg.sender` for a specified market to the Vault. A stake can be partially updated (added or removed) or entirely removed at any time by the same staker.
+
+### Events
+
+```solidity
+event StakeUpdated(
+    bytes32 indexed marketId,
+    address indexed staker,
+    uint256[] amounts
+)
+```
+
+### Functions
+
+```solidity
+function addStake(bytes32 marketId, uint256[] calldata amounts);
+function removeStake(bytes32 marketId, uint256[] calldata amounts);
+```
+
+The amounts array works the same way as arrays in PredictionMarket like `outcomeTokens` and `deltaShares`. To stake/unstake 100 shares of YES and 50 shares of NO in a market where `outcomeNames == ["NO", "YES"]`, `amounts` should be `[50e6, 100e6]`.
+
+## Locking
+
+### Events
+
+```solidity
+event LockUpdated(
+    bytes32 indexed marketId,
+    address indexed locker,
+    uint256[] amounts
+);
+
+event Unlocked(
+    bytes32 indexed marketId,
+    address indexed locker,
+    uint256[] amounts
+);
+```
+
+### Functions
+
+```solidity
+function addLock(bytes32 marketId, uint256[] calldata amounts);
+function unlock(bytes32 marketId);
+```
+
+`addLock` can be called multiple times while a market is not yet resolved to increase the locked position. It sends `amounts` outcome tokens from the caller to Vault. `unlock` can be called one time per user per market, and it returns all of their locked tokens **only after a market is resolved**. This means that one should only lock tokens if they are comfortable holding until resolution. See [this note](/protocol/prediction-market) for more information on oracles and trust in the protocol. In summary, one should not _buy_ let alone lock outcome tokens for a market with an oracle that they do not trust.
+
+## Boosting
+
+### Events
+
+```solidity
+event SponsoredLocked(
+    bytes32 indexed marketId,
+    address indexed user,
+    uint256 setsAmount, // amount of complete sets purchased and locked
+    uint256 userPaid, // amount of USDC paid from user
+    uint256 subsidyUsed, // amount of USDC subsidized by Vault
+    uint256 actualCost, // total USDC cost of complete sets purchase
+    uint256 outcomes, // number of outcomes, i.e. 2
+    uint256 nonce // see nonce note in functions section
+);
+
+// same event as unlocking non-sponsored locks
+event Unlocked(
+    bytes32 indexed marketId,
+    address indexed locker,
+    uint256[] amounts
+);
+```
+
+### Functions
+
+```solidity
+/**
+ * @notice Purchases and locks complete outcome sets with admin-signed subsidy
+ * @dev Uses admin signature to authorize subsidy. Purchases equal amounts of all outcomes
+ * @param marketId The market ID to purchase and lock tokens for
+ * @param setsAmount Amount of each outcome token to purchase
+ * @param subsidyAmount Maximum USDC subsidy allowed from vault
+ * @param deadline Timestamp when the signature expires
+ * @param nonce Unique nonce to prevent replay attacks
+ * @param signature Admin signature authorizing the subsidized purchase
+ */
+function sponsoredLock(
+    bytes32 marketId,
+    uint256 setsAmount,
+    uint256 subsidyAmount,
+    uint256 deadline,
+    uint256 nonce,
+    bytes calldata signature
+);
+
+// same function as with non-sponsored locks
+function unlock(bytes32 marketId);
+```
+
+`sponsoredLock` validates a `signature` that must be signed by the Vault’s admin signer and contains the market id, amount of complete sets to purchase, amount of usdc subsidized by Vault, expiration timestamp, and a nonce. After validating that the deadline has not passed, it purchases complete sets (1 complete set == 1 YES + 1 NO == ~$1) for that market via the PredictionMarket contract, taking `setsAmount` USDC from the caller and up to `subsidyAmount` USDC from the Vault itself to fund the purchase.
+
+The function was designed for Vault and the admin signer to be able to “pay the vig” for a complete sets purchase. For example, if a market’s outcomes are priced evenly (meaning its vig is near the target vig) and 1000 complete sets cost \$1070, Context might want to subsidize the \$70 so that a user can buy and lock those complete sets until resolution as part of its rewards program. In that example, 1000 complete sets will be redeemable for \$1000 once the market is resolved regardless of the outcome. Although it was designed for Context to pay the vig for liquidity boosts, the subsidyAmount can technically be any amount up to the entire cost of the complete sets.
+
+Sponsored locks are unlocked the same way as regular locks.
+
+<Card title="Still have questions?" href="https://discord.gg/FN2aXT6b" icon="discord" horizontal>
+  Ask in Discord.
+</Card>
